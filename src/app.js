@@ -97,6 +97,7 @@ class TitanBot extends Client {
       );
       
       this.setupCronJobs();
+      this.setupPrefixCommands();
     } catch (error) {
       logger.error('Failed to start bot:', error);
       process.exit(1);
@@ -227,12 +228,80 @@ class TitanBot extends Client {
     startServer(configuredPort, 0);
   }
 
-  setupCronJobs() {
-    cron.schedule('0 6 * * *', () => checkBirthdays(this));
-    cron.schedule('* * * * *', () => checkGiveaways(this));
-    cron.schedule('*/15 * * * *', () => this.updateAllCounters());
-  }
+ setupCronJobs() {
+  cron.schedule('0 6 * * *', () => checkBirthdays(this));
+  cron.schedule('* * * * *', () => checkGiveaways(this));
+  cron.schedule('*/15 * * * *', () => this.updateAllCounters());
+}
 
+setupPrefixCommands() {
+  const PREFIX = 'S!';
+
+  this.on('messageCreate', async (message) => {
+    if (message.author.bot) return;
+    if (!message.content.startsWith(PREFIX)) return;
+
+    const args = message.content.slice(PREFIX.length).trim().split(/ +/);
+    const commandName = args.shift().toLowerCase();
+
+    // Find the command from your existing slash commands collection
+    const command = this.commands.get(commandName);
+    if (!command) return;
+
+    // Build a fake context so your commands work with messages too
+    const fakeInteraction = {
+      user: message.author,
+      member: message.member,
+      guild: message.guild,
+      channel: message.channel,
+      reply: (content) => message.reply(content),
+      editReply: (content) => message.reply(content),
+      followUp: (content) => message.channel.send(content),
+      deferReply: async () => {},
+      isCommand: () => false,
+      isChatInputCommand: () => false,
+      options: {
+        getString: (name) => args[0] || null,
+        getUser: (name) => message.mentions.users.first() || null,
+        getMember: (name) => message.mentions.members.first() || null,
+        getInteger: (name) => parseInt(args[0]) || null,
+        getNumber: (name) => parseFloat(args[0]) || null,
+        getBoolean: (name) => args[0] === 'true',
+        getChannel: (name) => message.mentions.channels.first() || null,
+        getRole: (name) => message.mentions.roles.first() || null,
+        get: (name) => args[0] || null,
+      },
+      client: this,
+      createdTimestamp: message.createdTimestamp,
+    };
+
+    try {
+      // Check cooldown
+      if (!this.cooldowns.has(command.data.name)) {
+        this.cooldowns.set(command.data.name, new Collection());
+      }
+      const now = Date.now();
+      const timestamps = this.cooldowns.get(command.data.name);
+      const cooldownAmount = (command.cooldown ?? 3) * 1000;
+
+      if (timestamps.has(message.author.id)) {
+        const expiration = timestamps.get(message.author.id) + cooldownAmount;
+        if (now < expiration) {
+          const timeLeft = ((expiration - now) / 1000).toFixed(1);
+          return message.reply(`⏳ Wait **${timeLeft}s** before using \`S!${commandName}\` again.`);
+        }
+      }
+
+      timestamps.set(message.author.id, now);
+      setTimeout(() => timestamps.delete(message.author.id), cooldownAmount);
+
+      await command.execute(fakeInteraction);
+    } catch (error) {
+      logger.error(`Prefix command error [${commandName}]:`, error);
+      message.reply('❌ Something went wrong running that command.').catch(() => {});
+    }
+  });
+}
   async updateAllCounters() {
     if (!this.db) {
       logger.warn('Database not available for counter updates');
